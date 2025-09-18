@@ -1,6 +1,6 @@
 # models.py
 from sqlalchemy import (
-    Integer, String, ForeignKey, UniqueConstraint, Text, DateTime, Date, func, Index
+    Integer, Boolean, String, ForeignKey, UniqueConstraint, Text, DateTime, Date, func, Index
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from database import Base
@@ -22,6 +22,8 @@ class Student(Base):
     enrollments = relationship("Enrollment", back_populates="student", cascade="all, delete-orphan")
     counsels = relationship("CounselLog", back_populates="student", cascade="all, delete-orphan")
     attendances = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
+
+    homeroom_teacher_id: Mapped[int | None] = mapped_column(ForeignKey("teachers.id"), nullable=True, index=True)
 
 class Teacher(Base):
     __tablename__ = "teachers"
@@ -180,3 +182,32 @@ class MockExamSubjectScore(Base):
     )
 
     exam = relationship("MockExam", back_populates="scores")
+
+class User(Base):
+    """
+    시스템 접근 계정
+    - username/email 유니크
+    - role: 'admin' | 'teacher' | 'student'
+    - (선택) 특정 교사/학생 레코드와 연결
+    """
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="teacher")  # admin/teacher/student
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # 교사/학생 레코드 연결(선택)
+    teacher_id: Mapped[int | None] = mapped_column(ForeignKey("teachers.id"), nullable=True)
+    student_id: Mapped[int | None] = mapped_column(ForeignKey("students.id"), nullable=True)
+
+    # ✅ 첫 로그인 시 비번 변경 강제
+    password_change_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # 관계(필수는 아님)
+    # teacher = relationship("Teacher")  # 필요 시 활성화
+    # student = relationship("Student")
