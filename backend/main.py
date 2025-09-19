@@ -1,3 +1,7 @@
+# main.py
+# - 서버 실행: uvicorn main:app --reload
+import uvicorn
+
 from fastapi import FastAPI
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -75,3 +79,6 @@ app.include_router(attendance_router, prefix="/attendance",    tags=["attendance
 app.include_router(midterm_router,    prefix="/grades/midterm",tags=["grades: midterm"])
 app.include_router(final_router,      prefix="/grades/final",  tags=["grades: final"])
 app.include_router(mock_router,       prefix="/grades/mock",   tags=["grades: mock"])
+
+if __name__ == "__main__":
+    uvicorn.run("main:app")
