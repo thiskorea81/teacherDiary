@@ -30,11 +30,13 @@
         </tbody>
       </table>
     </div>
+    <AiInvoke compact default-provider="openai" />
   </template>
   
   <script setup>
   import { ref } from "vue";
   import api from "@/services/api";
+  import AiInvoke from "@/components/AiInvoke.vue";
   
   const studentId = ref("");
   const list = ref([]);

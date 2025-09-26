@@ -63,3 +63,25 @@ def decrypt_text(cipher: Optional[str]) -> Optional[str]:
     except InvalidToken:
         # 과거 평문 데이터가 섞여있을 수 있으니 안전 복호화
         return cipher
+
+def _get_fernet() -> Fernet:
+    key = os.environ.get("ENCRYPTION_KEY")
+    if not key:
+        raise RuntimeError("ENCRYPTION_KEY 가 .env에 설정되어 있어야 합니다 (Fernet base64 key).")
+    return Fernet(key)
+
+def encrypt_secret(plain: str) -> str:
+    if plain is None or plain == "":
+        return ""
+    f = _get_fernet()
+    return f.encrypt(plain.encode("utf-8")).decode("utf-8")
+
+def decrypt_secret(token: str) -> str:
+    if not token:
+        return ""
+    f = _get_fernet()
+    try:
+        return f.decrypt(token.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        # 키 변경 등으로 복호화 실패
+        return ""

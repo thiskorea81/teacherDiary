@@ -4,6 +4,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from database import Base
+from datetime import datetime
+
 
 class Student(Base):
     __tablename__ = "students"
@@ -194,7 +196,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
-    email: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False, default="test@test.com")
     full_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -211,3 +213,41 @@ class User(Base):
     # 관계(필수는 아님)
     # teacher = relationship("Teacher")  # 필요 시 활성화
     # student = relationship("Student")
+
+class UserSetting(Base):
+    __tablename__ = "user_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True, nullable=False)
+    ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)      # ✅ Gemini
+    openai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)  # ✅ OpenAI
+
+    # ✅ 실제 타입을 import 해서 사용
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+
+class HomeroomAssignment(Base):
+    __tablename__ = "homeroom_assignments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 학년도(예: 2025). 필요 시 파라미터로 바꿀 수 있음
+    school_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    grade: Mapped[int] = mapped_column(Integer, nullable=False)
+    class_no: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # 담임 교사는 User를 직접 가리킵니다 (teacher_id/student_id는 그대로 두라는 요구 반영)
+    teacher_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    teacher_user = relationship("User")
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("school_year", "grade", "class_no", name="uq_homeroom_year_grade_class"),
+    )

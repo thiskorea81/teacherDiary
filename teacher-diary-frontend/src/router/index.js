@@ -11,6 +11,8 @@ import SignupView from "@/views/SignupView.vue";
 import ChangePasswordView from "@/views/ChangePasswordView.vue";
 import AdminUsersView from "@/views/AdminUsersView.vue";
 import PendingApprovalView from "@/views/PendingApprovalView.vue";
+import SettingsView from "@/views/SettingsView.vue";
+import HomeroomUploadView from "@/views/HomeroomUploadView.vue";
 
 const routes = [
   { path: "/login", name: "login", component: LoginView, meta: { public: true } },
@@ -25,9 +27,11 @@ const routes = [
   { path: "/attendance", name: "attendance", component: AttendanceView, meta: { roles: ["teacher","admin"] } },
   { path: "/counsel", name: "counsel", component: CounselView, meta: { roles: ["teacher","admin"] } },
   { path: "/grades", name: "grades", component: GradesView, meta: { roles: ["teacher","admin"] } },
+  { path: "/settings", name: "settings", component: SettingsView },
 
   // 관리자 전용
   { path: "/admin/users", name: "admin-users", component: AdminUsersView, meta: { roles: ["admin"] } },
+  { path: "/homeroom/upload", name: "homeroom-upload", component: HomeroomUploadView, meta: { roles: ["teacher","admin"] } },
 ];
 
 const router = createRouter({

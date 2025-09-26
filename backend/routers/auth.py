@@ -1,4 +1,6 @@
 # routers/auth.py
+from __future__ import annotations
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -6,10 +8,13 @@ from fastapi import (
     status,
     UploadFile,
     File,
+    Query,
 )
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, text
 from typing import Optional, Literal, Callable, List
 import csv, io
 
@@ -19,7 +24,7 @@ from security import hash_password, verify_password, create_access_token, decode
 
 router = APIRouter()
 
-# -------------------- OAuth2 / 공통 --------------------
+# ==================== 공통 / 인증 헬퍼 ====================
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 Role = Literal["admin", "teacher", "student"]
 
@@ -59,7 +64,7 @@ def role_required(*roles: Role) -> Callable:
     return _dep
 
 
-# -------------------- 스키마 --------------------
+# ==================== 스키마 ====================
 class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     email: EmailStr
@@ -70,7 +75,8 @@ class UserCreate(BaseModel):
     student_id: Optional[int] = None
 
 
-class UserRead(BaseModel):
+# 본인 정보 등 "엄격 이메일 검증"이 필요한 응답
+class PublicUserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     username: str
@@ -81,6 +87,24 @@ class UserRead(BaseModel):
     teacher_id: Optional[int]
     student_id: Optional[int]
     password_change_required: bool
+
+
+# 관리자 목록/보관 목록 등: 이메일 검증을 느슨하게(str) 처리
+class AdminUserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str]
+    role: Role
+    is_active: bool
+    teacher_id: Optional[int]
+    student_id: Optional[int]
+    password_change_required: bool
+
+
+class AdminArchivedUserRead(AdminUserRead):
+    archived_year: Optional[int] = None
 
 
 class TokenResponse(BaseModel):
@@ -98,12 +122,23 @@ class AdminResetPassword(BaseModel):
     user_id: int
     new_password: str = Field(min_length=6)
 
+
 class ApproveUser(BaseModel):
     user_id: int
     approve: bool = True
 
-# -------------------- 회원가입 / 로그인 / 내정보 --------------------
-@router.post("/signup", response_model=UserRead)
+
+class BulkArchiveIn(BaseModel):
+    user_ids: List[int]
+    year: int
+
+
+class BulkIdsIn(BaseModel):
+    user_ids: List[int]
+
+
+# ==================== 회원가입 / 로그인 / 내정보 ====================
+@router.post("/signup", response_model=PublicUserRead)
 def signup(payload: UserCreate, db: Session = Depends(get_db)):
     # 1) admin 가입 차단
     if payload.role == "admin":
@@ -130,8 +165,8 @@ def signup(payload: UserCreate, db: Session = Depends(get_db)):
         role=payload.role,  # "teacher" | "student"
         teacher_id=payload.teacher_id,
         student_id=payload.student_id,
-        is_active=False,                 # ✅ 승인 전까지 비활성
-        password_change_required=True,   # 첫 로그인 시 변경
+        is_active=False,                  # ✅ 승인 전까지 비활성
+        password_change_required=False,   # ✅ 가입자는 비밀번호 즉시 변경 강제 안 함
     )
     db.add(user)
     db.commit()
@@ -157,12 +192,12 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
     )
 
 
-@router.get("/me", response_model=UserRead)
+@router.get("/me", response_model=PublicUserRead)
 def me(current: User = Depends(get_current_user)):
     return current
 
 
-# -------------------- 비밀번호 변경 / 초기화 --------------------
+# ==================== 비밀번호 변경 / 초기화 ====================
 @router.post("/change_password")
 def change_password(
     payload: PasswordChange,
@@ -188,15 +223,40 @@ def admin_reset_password(payload: AdminResetPassword, db: Session = Depends(get_
     return {"ok": True}
 
 
-# -------------------- 관리자: CSV 일괄 업로드 --------------------
+@router.post("/admin/reset_password_bulk", dependencies=[Depends(role_required("admin"))])
+def admin_reset_password_bulk(payload: BulkIdsIn, db: Session = Depends(get_db)):
+    """
+    선택 사용자 비번을 통일 초기화: 'a123456789!'
+    (관리자/본인 계정 보호는 프론트에서 걸고, 백엔드에선 존재하는 id만 처리)
+    """
+    target_ids = list(set(payload.user_ids or []))
+    if not target_ids:
+        return {"updated": [], "password": "a123456789!"}
+
+    users = db.query(User).filter(User.id.in_(target_ids)).all()
+    new_pwd_hash = hash_password("a123456789!")
+    updated = []
+    for u in users:
+        u.hashed_password = new_pwd_hash
+        u.password_change_required = True
+        updated.append(u.username)
+    db.commit()
+    return {"updated": updated, "password": "a123456789!"}
+
+
+# ==================== 관리자: CSV 업로드 (간단형) ====================
 """
-CSV 예시 (헤더 포함):
-username,email,role,password,full_name,teacher_id,student_id
-t01,t01@sch.kr,teacher,Temp!234,김교사,1,
-s1001,s1001@sch.kr,student,Std!234,홍학생,,101
+간단 CSV 예시 (헤더 포함):
+username,password,full_name,role
+t01,Temp!234,김교사,teacher
+s1001,Std!234,홍학생,student
+
+- email은 username+"@local" 자동 설정 (관리자 목록 응답은 느슨 검증이라 OK)
+- 교사 username이 't'로 시작하면 Teacher 레코드 자동 생성(없으면)
+- 학생 username이 's'로 시작하면 student_id를 username에서 s 제거 후 숫자 변환해 자동 매핑(해당 Student가 없으면 생략)
 """
-@router.post("/admin/bulk_csv", dependencies=[Depends(role_required("admin"))])
-def admin_bulk_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+@router.post("/admin/bulk_users_simple", dependencies=[Depends(role_required("admin"))])
+def admin_bulk_users_simple(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV 파일을 업로드하세요.")
 
@@ -206,46 +266,64 @@ def admin_bulk_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     created: List[str] = []
     updated: List[str] = []
     skipped: List[str] = []
+    skipped_reasons: dict[str, str] = {}
 
     for row in reader:
         username = (row.get("username") or "").strip()
-        email = (row.get("email") or "").strip()
-        role = (row.get("role") or "teacher").strip()
         password = (row.get("password") or "").strip()
         full_name = (row.get("full_name") or "").strip() or None
+        role = (row.get("role") or "").strip().lower()
 
-        teacher_id = row.get("teacher_id")
-        student_id = row.get("student_id")
-        teacher_id = int(teacher_id) if teacher_id and str(teacher_id).strip() else None
-        student_id = int(student_id) if student_id and str(student_id).strip() else None
-
-        if not username or not email or not password or role not in ("admin", "teacher", "student"):
-            skipped.append(username or email or "?")
+        if not username or not password or role not in ("teacher", "student", "admin"):
+            key = username or "?"
+            skipped.append(key)
+            skipped_reasons[key] = "필수값 누락 또는 잘못된 role"
             continue
 
-        if teacher_id and not db.get(Teacher, teacher_id):
-            skipped.append(username)
-            continue
-        if student_id and not db.get(Student, student_id):
-            skipped.append(username)
-            continue
+        # email 자동
+        email = f"{username}@local"
 
-        # username 또는 email이 겹치면 업데이트 정책
-        user = db.query(User).filter((User.username == username) | (User.email == email)).first()
+        # teacher/student 연결 자동 추론
+        teacher_id: Optional[int] = None
+        student_id: Optional[int] = None
+
+        # 교사: username 이 t* 인 경우 Teacher 자동 생성/매핑
+        if username.startswith("t") and role == "teacher":
+            teacher = db.query(Teacher).filter(Teacher.name == (full_name or username)).first()
+            if not teacher:
+                teacher = Teacher(name=(full_name or username))
+                db.add(teacher)
+                db.flush()  # id 확보
+            teacher_id = teacher.id
+
+        # 학생: username 이 s* 인 경우 student_id 자동 추출 (s 접두어 제거 숫자)
+        if username.startswith("s") and role == "student":
+            try:
+                sid_num = int(username[1:])
+                stu = db.query(Student).filter(Student.id == sid_num).first()
+                # 업로드 데이터 정책에 따라: Student 테이블에 해당 id가 없으면 그냥 연결 생략
+                if stu:
+                    student_id = stu.id
+            except ValueError:
+                pass
+
+        # username 또는 email 충돌 시 업데이트
+        user = db.query(User).filter(or_(User.username == username, User.email == email)).first()
         if user:
             user.hashed_password = hash_password(password)
-            user.role = role
             user.full_name = full_name
+            user.role = role
             user.teacher_id = teacher_id
             user.student_id = student_id
-            user.password_change_required = True  # 다음 로그인 시 변경 강제
+            user.is_active = True
+            user.password_change_required = True
             updated.append(username)
         else:
             user = User(
                 username=username,
                 email=email,
-                role=role,
                 full_name=full_name,
+                role=role,
                 hashed_password=hash_password(password),
                 teacher_id=teacher_id,
                 student_id=student_id,
@@ -256,12 +334,38 @@ def admin_bulk_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
             created.append(username)
 
     db.commit()
-    return {"created": created, "updated": updated, "skipped": skipped}
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_reasons": skipped_reasons,
+    }
 
-# -------------------- 관리자 승인/거부 --------------------
-@router.get("/admin/pending", response_model=list[UserRead], dependencies=[Depends(role_required("admin"))])
+
+@router.get("/admin/csv_template", dependencies=[Depends(role_required("admin"))])
+def admin_csv_template(kind: str = Query("simple", pattern="^(simple)$")):
+    """
+    kind=simple -> username,password,full_name,role
+    """
+    if kind == "simple":
+        csv_text = (
+            "username,password,full_name,role\n"
+            "t01,Temp!234,김교사,teacher\n"
+            "s1001,Std!234,홍학생,student\n"
+        )
+        return Response(
+            content=csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="bulk_users_simple.csv"'},
+        )
+    raise HTTPException(status_code=400, detail="지원하지 않는 템플릿")
+
+
+# ==================== 관리자: 승인/목록 ====================
+@router.get("/admin/pending", response_model=list[AdminUserRead], dependencies=[Depends(role_required("admin"))])
 def admin_pending(db: Session = Depends(get_db)):
     return db.query(User).filter(User.is_active == False).all()
+
 
 @router.post("/admin/approve", dependencies=[Depends(role_required("admin"))])
 def admin_approve(payload: ApproveUser, db: Session = Depends(get_db)):
@@ -272,17 +376,110 @@ def admin_approve(payload: ApproveUser, db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True, "user_id": user.id, "is_active": user.is_active}
 
-@router.get("/admin/active", response_model=list[UserRead], dependencies=[Depends(role_required("admin"))])
+
+@router.get("/admin/active", response_model=list[AdminUserRead], dependencies=[Depends(role_required("admin"))])
 def admin_active(db: Session = Depends(get_db)):
-    return db.query(User).filter(User.is_active == True).all()
-
-# -------------------- (옵션) 관리자 핑 --------------------
-@router.get("/admin/ping", dependencies=[Depends(role_required("admin"))])
-def admin_ping():
-    return {"ok": True, "msg": "admin only!"}
+    return db.query(User).filter(User.is_active == True, getattr(User, "archived_year", None) == None).all()
 
 
-# -------------------- 다른 라우터에서 쓰는 권한 헬퍼 --------------------
+# ==================== 관리자: 보관/삭제 ====================
+# 주의: 아래 API들은 users 테이블에 archived_year 컬럼이 있다고 가정합니다.
+# (없다면 main.py 스타트업에서 ALTER TABLE 로 추가하세요)
+@router.get("/admin/users/archived", response_model=list[AdminArchivedUserRead], dependencies=[Depends(role_required("admin"))])
+def admin_archived(db: Session = Depends(get_db)):
+    if not hasattr(User, "archived_year"):
+        # 컬럼이 없다면 빈 배열 반환(또는 501 에러)
+        return []
+    return db.query(User).filter(User.archived_year.isnot(None)).all()
+
+
+@router.post("/admin/users/archive", dependencies=[Depends(role_required("admin"))])
+def admin_archive(payload: BulkArchiveIn, db: Session = Depends(get_db)):
+    if not hasattr(User, "archived_year"):
+        raise HTTPException(status_code=500, detail="archived_year 컬럼이 없습니다. DB 마이그레이션 필요")
+    if not payload.user_ids:
+        return {"ok": True, "count": 0}
+    q = db.query(User).filter(User.id.in_(payload.user_ids))
+    count = 0
+    for u in q.all():
+        u.archived_year = payload.year
+        u.is_active = False  # 보관 시 비활성화
+        count += 1
+    db.commit()
+    return {"ok": True, "count": count}
+
+
+@router.post("/admin/users/unarchive", dependencies=[Depends(role_required("admin"))])
+def admin_unarchive(payload: BulkIdsIn, db: Session = Depends(get_db)):
+    if not hasattr(User, "archived_year"):
+        raise HTTPException(status_code=500, detail="archived_year 컬럼이 없습니다. DB 마이그레이션 필요")
+    if not payload.user_ids:
+        return {"ok": True, "count": 0}
+    q = db.query(User).filter(User.id.in_(payload.user_ids))
+    count = 0
+    for u in q.all():
+        u.archived_year = None
+        # 재활성 여부는 정책에 따라. 여기선 활성화로 복원
+        u.is_active = True
+        count += 1
+    db.commit()
+    return {"ok": True, "count": count}
+
+
+@router.post("/admin/users/delete", dependencies=[Depends(role_required("admin"))])
+def admin_delete(payload: BulkIdsIn, current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not payload.user_ids:
+        return {"ok": True, "count": 0}
+    ids = set(payload.user_ids)
+    # 자기 자신/다른 관리자 보호 로직(정책에 따라 조정 가능)
+    survivors = db.query(User).filter(User.id.in_(ids)).all()
+    count = 0
+    for u in survivors:
+        if u.id == current.id:
+            continue
+        # 관리자는 삭제 금지(원하면 허용으로 바꾸세요)
+        if u.role == "admin":
+            continue
+        db.delete(u)
+        count += 1
+    db.commit()
+    return {"ok": True, "count": count}
+
+
+# ==================== 관리자: DB 전체 삭제 (초치명) ====================
+class WipeAllIn(BaseModel):
+    confirm: str = Field(pattern="^WIPE-ALL$")
+
+
+@router.post("/admin/db/wipe_all", dependencies=[Depends(role_required("admin"))])
+def admin_db_wipe_all(payload: WipeAllIn, db: Session = Depends(get_db)):
+    # SQLAlchemy로 전 테이블 드롭/재생성은 보통 앱 기동부에서 수행.
+    # 여기서는 SQLite용 간단 초기화 예시(주의: 실제 운영 DB에서는 절대 이렇게 하지 마세요!)
+    if payload.confirm != "WIPE-ALL":
+        raise HTTPException(status_code=400, detail="확인 문자열이 일치하지 않습니다.")
+    # SQLite 전용: 전체 스키마 드롭 후 재생성
+    # 안전을 위해 pragma foreign_keys off/on
+    db.execute(text("PRAGMA foreign_keys=OFF;"))
+    # User-defined 테이블 삭제
+    tables = [
+        "mock_exam_scores", "mock_exams",
+        "final_scores", "midterm_scores",
+        "attendances", "counsel_logs",
+        "enrollments", "subjects", "teachers",
+        "user_settings", "homeroom_assignments",
+        "students", "users",
+    ]
+    for t in tables:
+        try:
+            db.execute(text(f'DROP TABLE IF EXISTS "{t}";'))
+        except Exception:
+            pass
+    db.execute(text("PRAGMA foreign_keys=ON;"))
+    db.commit()
+    return {"ok": True, "msg": "DB 스키마 삭제 완료. 앱 재기동 시 create_all 로 재생성됩니다."}
+
+
+# ==================== 다른 라우터에서 쓰는 권한 헬퍼 ====================
 from typing import Optional as _Optional  # 이름 충돌 방지용
 
 def assert_can_view_student(

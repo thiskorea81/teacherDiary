@@ -8,6 +8,11 @@
           <router-link v-if="isTeacherOrAdmin" to="/attendance">출결</router-link>
           <router-link v-if="isTeacherOrAdmin" to="/counsel">상담</router-link>
           <router-link v-if="isTeacherOrAdmin" to="/grades">성적</router-link>
+          <router-link v-if="auth.isLoggedIn" to="/settings">환경설정</router-link>
+          <!-- 교사/관리자: 담임 업로드 -->
+          <router-link v-if="(auth.role==='teacher' || auth.role==='admin')" to="/homeroom/upload">
+          담임 업로드
+          </router-link>
   
           <!-- 관리자 전용 -->
           <router-link v-if="auth.role==='admin'" to="/admin/users">관리자: 사용자</router-link>
